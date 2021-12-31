@@ -6,7 +6,6 @@
 namespace Microsoft.ServiceFabric.Services
 {
     using System;
-    using System.Globalization;
 
     /// <summary>
     /// This class provides the logic for deriving the names of various items within the manifest from the code.
@@ -32,7 +31,7 @@ namespace Microsoft.ServiceFabric.Services
         /// </remarks>
         public static string GetEndpointName(Type serviceInterfaceType)
         {
-            return string.Format(CultureInfo.InvariantCulture, "{0}Endpoint", GetName(serviceInterfaceType));
+            return $"{GetName(serviceInterfaceType)}Endpoint";
         }
 
         internal static string GetName(Type serviceInterfaceType)
@@ -43,9 +42,9 @@ namespace Microsoft.ServiceFabric.Services
         internal static string GetName(string serviceInterfaceTypeName)
         {
             var serviceName = serviceInterfaceTypeName;
-            if (!serviceName.EndsWith("Service", StringComparison.InvariantCultureIgnoreCase))
+            if (!serviceName.EndsWith("Service", StringComparison.OrdinalIgnoreCase))
             {
-                serviceName = string.Format(CultureInfo.InvariantCulture, "{0}Service", serviceName);
+                serviceName = $"{serviceName}Service";
             }
 
             if ((serviceName[0] == 'I') && !char.IsLower(serviceName[1]))
@@ -54,7 +53,7 @@ namespace Microsoft.ServiceFabric.Services
             }
             else
             {
-                return string.Format(CultureInfo.InvariantCulture, serviceName);
+                return serviceName;
             }
         }
     }

@@ -6,14 +6,13 @@
 namespace Microsoft.ServiceFabric.Actors.Runtime
 {
     using System;
-    using System.Collections;
     using System.Collections.Generic;
     using System.Fabric;
     using System.Runtime.Serialization;
     using System.Threading.Tasks;
     using Microsoft.ServiceFabric.Services.Common;
 
-    internal class VolatileActorStateTable<TType, TKey, TValue>
+    internal sealed class VolatileActorStateTable<TType, TKey, TValue>
     {
         private readonly Dictionary<TType, Dictionary<TKey, TableEntry>> committedEntriesTable;
 
@@ -56,18 +55,7 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
         {
             using (this.rwLock.AcquireReadLock())
             {
-                if (this.uncommittedEntriesList.Count > 0)
-                {
-                    return this.uncommittedEntriesList.Last.Value.ActorStateDataWrapper.SequenceNumber;
-                }
-                else if (this.committedEntriesList.Count > 0)
-                {
-                    return this.committedEntriesList.Last.Value.ActorStateDataWrapper.SequenceNumber;
-                }
-                else
-                {
-                    return 0;
-                }
+                return (this.uncommittedEntriesList.Last ?? this.committedEntriesList.Last)?.Value.ActorStateDataWrapper.SequenceNumber ?? 0;
             }
         }
 
@@ -75,18 +63,11 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
         {
             using (this.rwLock.AcquireReadLock())
             {
-                if (this.committedEntriesList.Count > 0)
-                {
-                    return this.committedEntriesList.Last.Value.ActorStateDataWrapper.SequenceNumber;
-                }
-                else
-                {
-                    return 0;
-                }
+                return this.committedEntriesList.Last?.Value.ActorStateDataWrapper.SequenceNumber ?? 0;
             }
         }
 
-        public void PrepareUpdate(IEnumerable<ActorStateDataWrapper> actorStateDataWrapperList, long sequenceNumber)
+        public void PrepareUpdate(List<ActorStateDataWrapper> actorStateDataWrapperList, long sequenceNumber)
         {
             // Invalid LSN
             if (sequenceNumber == 0)
@@ -113,17 +94,12 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
             }
         }
 
-        public async Task CommitUpdateAsync(long sequenceNumber, Exception ex = null)
+        public Task CommitUpdateAsync(long sequenceNumber, Exception ex = null)
         {
             // Invalid LSN
             if (sequenceNumber == 0)
             {
-                if (ex != null)
-                {
-                    throw ex;
-                }
-
-                throw new FabricException(FabricErrorCode.SequenceNumberCheckFailed);
+                throw ex ?? new FabricException(FabricErrorCode.SequenceNumberCheckFailed);
             }
 
             // This list is used to store the replication contexts that have been commited
@@ -149,12 +125,8 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
 
                 if (sequenceNumber == this.uncommittedEntriesList.First.Value.ActorStateDataWrapper.SequenceNumber)
                 {
-                    while (
-                        this.uncommittedEntriesList.Count > 0 &&
-                        this.uncommittedEntriesList.First.Value.IsReplicationComplete)
+                    while (this.uncommittedEntriesList.First is { Value: { IsReplicationComplete: true } } listNode)
                     {
-                        var listNode = this.uncommittedEntriesList.First;
-
                         this.uncommittedEntriesList.RemoveFirst();
 
                         if (!listNode.Value.IsFailed)
@@ -165,9 +137,10 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
                         listNode.Value.CompleteReplication();
 
                         var seqNum = listNode.Value.ActorStateDataWrapper.SequenceNumber;
-                        if (this.pendingReplicationContexts[seqNum].IsAllEntriesComplete)
+                        var pendingContext = this.pendingReplicationContexts[seqNum];
+                        if (pendingContext.IsAllEntriesComplete)
                         {
-                            committedReplicationContexts.Add(this.pendingReplicationContexts[seqNum]);
+                            committedReplicationContexts.Add(pendingContext);
                             this.pendingReplicationContexts.Remove(seqNum);
                         }
                     }
@@ -182,10 +155,7 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
                 repCtx.MarkAsCompleted();
             }
 
-            if (replicationContext != null)
-            {
-                await replicationContext.WaitForCompletionAsync();
-            }
+            return replicationContext != null ? replicationContext.WaitForCompletionAsync() : TaskDone.Done;
         }
 
         public void ApplyUpdates(IEnumerable<ActorStateDataWrapper> actorStateDataList)
@@ -204,70 +174,83 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
         {
             using (this.rwLock.AcquireReadLock())
             {
-                var exists = this.committedEntriesTable.TryGetValue(type, out var keyTable);
-
-                if (exists)
+                if (this.committedEntriesTable.TryGetValue(type, out var table) && table.TryGetValue(key, out var tableEntry))
                 {
-                    exists = keyTable.TryGetValue(key, out var tableEntry);
-
-                    value = exists ? tableEntry.ActorStateDataWrapper.Value : default(TValue);
+                    value = tableEntry.ActorStateDataWrapper.Value;
+                    return true;
                 }
-                else
-                {
-                    value = default(TValue);
-                }
-
-                return exists;
             }
+
+            value = default;
+            return false;
         }
 
         public IEnumerator<TKey> GetSortedStorageKeyEnumerator(TType type, Func<TKey, bool> filter)
         {
-            using (this.rwLock.AcquireWriteLock())
-            {
-                var committedStorageKeyList = new List<TKey>();
+            var committedStorageKeyList = new List<TKey>();
 
+            using (this.rwLock.AcquireReadLock())
+            {
                 // Though VolatileActorStateTable can use SortedDictionary<>
                 // which will also us to always get the keys in sorted order,
                 // the lookup in SortedDictionary<> is O(logN) as opposed to
                 // Dictionary<> which is average O(1).
                 if (this.committedEntriesTable.TryGetValue(type, out var keyTable))
                 {
-                    foreach (var kvPair in keyTable)
+                    foreach (var key in keyTable.Keys)
                     {
-                        if (filter(kvPair.Key))
+                        if (filter(key))
                         {
-                            committedStorageKeyList.Add(kvPair.Key);
+                            committedStorageKeyList.Add(key);
                         }
                     }
-
-                    // SortedList<> is designed to be used when we need the list
-                    // to be sorted through its intermediate stages. If the list
-                    // needs to be sorted only at the end of adding all entries
-                    // then using List<> is better.
-                    committedStorageKeyList.Sort();
                 }
-
-                return committedStorageKeyList.GetEnumerator();
             }
+
+            // SortedList<> is designed to be used when we need the list
+            // to be sorted through its intermediate stages. If the list
+            // needs to be sorted only at the end of adding all entries
+            // then using List<> is better.
+            committedStorageKeyList.Sort();
+            return committedStorageKeyList.GetEnumerator();
         }
 
-        public IReadOnlyDictionary<TKey, TValue> GetActorStateDictionary(TType type)
+        public List<TValue> GetActorStateValues(TType type)
         {
+            var list = new List<TValue>();
+
             using (this.rwLock.AcquireReadLock())
             {
-                var actorStateDict = new Dictionary<TKey, TValue>();
-
                 if (this.committedEntriesTable.TryGetValue(type, out var keyTable))
                 {
+                    list.Capacity = keyTable.Count;
                     foreach (var entry in keyTable.Values)
                     {
-                        actorStateDict.Add(entry.ActorStateDataWrapper.Key, entry.ActorStateDataWrapper.Value);
+                        list.Add(entry.ActorStateDataWrapper.Value);
                     }
                 }
-
-                return actorStateDict;
             }
+
+            return list;
+        }
+
+        public List<TKey> GetActorStateKeys(TType type)
+        {
+            var list = new List<TKey>();
+
+            using (this.rwLock.AcquireReadLock())
+            {
+                if (this.committedEntriesTable.TryGetValue(type, out var keyTable))
+                {
+                    list.Capacity = keyTable.Count;
+                    foreach (var key in keyTable.Keys)
+                    {
+                        list.Add(key);
+                    }
+                }
+            }
+
+            return list;
         }
 
         public ActorStateEnumerator GetShallowCopiesEnumerator(TType type)
@@ -295,19 +278,20 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
         /// </summary>
         public ActorStateEnumerator GetShallowCopiesEnumerator(long maxSequenceNumber)
         {
+            var committedEntriesListShallowCopy = new List<ActorStateDataWrapper>();
+            var uncommittedEntriesListShallowCopy = new List<ActorStateDataWrapper>();
+
             using (this.rwLock.AcquireReadLock())
             {
-                var committedEntriesListShallowCopy = new List<ActorStateDataWrapper>();
-                var uncommittedEntriesListShallowCopy = new List<ActorStateDataWrapper>();
-
                 long copiedSequenceNumber = 0;
                 foreach (var entry in this.committedEntriesList)
                 {
-                    if (entry.ActorStateDataWrapper.SequenceNumber <= maxSequenceNumber)
+                    var wrapper = entry.ActorStateDataWrapper;
+                    if (wrapper.SequenceNumber <= maxSequenceNumber)
                     {
-                        copiedSequenceNumber = entry.ActorStateDataWrapper.SequenceNumber;
+                        copiedSequenceNumber = wrapper.SequenceNumber;
 
-                        committedEntriesListShallowCopy.Add(entry.ActorStateDataWrapper);
+                        committedEntriesListShallowCopy.Add(wrapper);
                     }
                     else
                     {
@@ -319,9 +303,10 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
                 {
                     foreach (var entry in this.uncommittedEntriesList)
                     {
-                        if (entry.ActorStateDataWrapper.SequenceNumber <= maxSequenceNumber)
+                        var wrapper = entry.ActorStateDataWrapper;
+                        if (wrapper.SequenceNumber <= maxSequenceNumber)
                         {
-                            uncommittedEntriesListShallowCopy.Add(entry.ActorStateDataWrapper);
+                            uncommittedEntriesListShallowCopy.Add(wrapper);
                         }
                         else
                         {
@@ -329,11 +314,11 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
                         }
                     }
                 }
-
-                return new ActorStateEnumerator(
-                    committedEntriesListShallowCopy,
-                    uncommittedEntriesListShallowCopy);
             }
+
+            return new ActorStateEnumerator(
+                committedEntriesListShallowCopy,
+                uncommittedEntriesListShallowCopy);
         }
 
         #endregion Public API
@@ -342,12 +327,11 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
 
         private void ApplyUpdate_UnderWriteLock(LinkedListNode<ListEntry> listNode)
         {
-            var type = listNode.Value.ActorStateDataWrapper.Type;
-            var key = listNode.Value.ActorStateDataWrapper.Key;
-            var isDelete = listNode.Value.ActorStateDataWrapper.IsDelete;
-            var newTableEntry = new TableEntry(
-                listNode.Value.ActorStateDataWrapper,
-                listNode);
+            var stateData = listNode.Value.ActorStateDataWrapper;
+            var type = stateData.Type;
+            var key = stateData.Key;
+            var isDelete = stateData.IsDelete;
+            var newTableEntry = new TableEntry(stateData, listNode);
 
             if (!this.committedEntriesTable.TryGetValue(type, out var keyTable))
             {
@@ -361,8 +345,7 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
 
                 this.committedEntriesTable[type] = keyTable;
             }
-
-            if (keyTable.TryGetValue(key, out var oldTableEntry))
+            else if (keyTable.TryGetValue(key, out var oldTableEntry))
             {
                 this.committedEntriesList.Remove(oldTableEntry.ListNode);
             }
@@ -380,8 +363,7 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
             // sequence number of the last commit, which may be a delete.
             // If the current last element represents a delete, then it can
             // be removed now since we're adding a new last element.
-            if (this.committedEntriesList.Count > 0 &&
-                this.committedEntriesList.Last.Value.ActorStateDataWrapper.IsDelete)
+            if (this.committedEntriesList.Last?.Value.ActorStateDataWrapper.IsDelete == true)
             {
                 this.committedEntriesList.RemoveLast();
             }
@@ -394,7 +376,7 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
         #region Public inner classes
 
         [DataContract]
-        public class ActorStateDataWrapper
+        public sealed class ActorStateDataWrapper
         {
             private ActorStateDataWrapper(
                 TType type,
@@ -455,14 +437,12 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
             }
         }
 
-        public class ActorStateEnumerator : IReadOnlyCollection<ActorStateDataWrapper>,
-            IEnumerator<ActorStateDataWrapper>
+        public sealed class ActorStateEnumerator
         {
             private readonly List<ActorStateDataWrapper> committedEntriesListShallowCopy;
             private readonly List<ActorStateDataWrapper> uncommittedEntriesListShallowCopy;
 
             private int index;
-            private ActorStateDataWrapper current;
 
             public ActorStateEnumerator(
                 List<ActorStateDataWrapper> committedEntriesList,
@@ -470,42 +450,14 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
             {
                 this.committedEntriesListShallowCopy = committedEntriesList;
                 this.uncommittedEntriesListShallowCopy = uncommittedEntriesList;
-                this.index = 0;
-                this.current = null;
             }
 
-            public long CommittedCount
-            {
-                get { return this.committedEntriesListShallowCopy.Count; }
-            }
+            public int CommittedCount => this.committedEntriesListShallowCopy.Count;
 
-            public long UncommittedCount
-            {
-                get { return this.uncommittedEntriesListShallowCopy.Count; }
-            }
-
-            int IReadOnlyCollection<ActorStateDataWrapper>.Count
-            {
-                get
-                {
-                    return this.committedEntriesListShallowCopy.Count + this.uncommittedEntriesListShallowCopy.Count;
-                }
-            }
-
-            ActorStateDataWrapper IEnumerator<ActorStateDataWrapper>.Current
-            {
-                get { return this.current; }
-            }
-
-            object IEnumerator.Current
-            {
-                get { return this.current; }
-            }
+            public int UncommittedCount => this.uncommittedEntriesListShallowCopy.Count;
 
             public ActorStateDataWrapper PeekNext()
             {
-                ActorStateDataWrapper item = null;
-
                 var committedCount = this.committedEntriesListShallowCopy.Count;
                 var uncommittedCount = this.uncommittedEntriesListShallowCopy.Count;
 
@@ -513,75 +465,26 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
 
                 if (next < committedCount)
                 {
-                    item = this.committedEntriesListShallowCopy[next];
+                    return this.committedEntriesListShallowCopy[next];
                 }
                 else if (next < uncommittedCount + committedCount)
                 {
-                    item = this.uncommittedEntriesListShallowCopy[next - committedCount];
+                    return this.uncommittedEntriesListShallowCopy[next - committedCount];
                 }
                 else
                 {
-                    item = null;
+                    return null;
                 }
-
-                return item;
             }
 
-            public ActorStateDataWrapper GetNext()
-            {
-                var committedCount = this.committedEntriesListShallowCopy.Count;
-                var uncommittedCount = this.uncommittedEntriesListShallowCopy.Count;
-
-                var next = this.index++;
-
-                if (next < committedCount)
-                {
-                    this.current = this.committedEntriesListShallowCopy[next];
-                }
-                else if (next < uncommittedCount + committedCount)
-                {
-                    this.current = this.uncommittedEntriesListShallowCopy[next - committedCount];
-                }
-                else
-                {
-                    this.current = null;
-                }
-
-                return this.current;
-            }
-
-            IEnumerator<ActorStateDataWrapper> IEnumerable<ActorStateDataWrapper>.GetEnumerator()
-            {
-                return this;
-            }
-
-            IEnumerator IEnumerable.GetEnumerator()
-            {
-                return this;
-            }
-
-            void IDisposable.Dispose()
-            {
-                // no-op
-            }
-
-            bool IEnumerator.MoveNext()
-            {
-                return this.GetNext() != null;
-            }
-
-            void IEnumerator.Reset()
-            {
-                this.index = 0;
-                this.current = null;
-            }
+            public void MoveNext() => this.index++;
         }
 
         #endregion Public inner classes
 
         #region Private inner classes
 
-        private class ReplicationContext
+        private sealed class ReplicationContext
         {
             private readonly TaskCompletionSource<object> pendingCommitTaskSource;
             private Exception replicationException;
@@ -644,7 +547,7 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
             }
         }
 
-        private class ListEntry
+        private sealed class ListEntry
         {
             public ListEntry(
                 ActorStateDataWrapper actorStateDataWrapper,
@@ -652,46 +555,26 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
             {
                 this.ActorStateDataWrapper = actorStateDataWrapper;
                 this.PendingReplicationContext = replicationContext;
-
-                if (this.PendingReplicationContext != null)
-                {
-                    this.PendingReplicationContext.AssociateListEntry();
-                }
+                replicationContext?.AssociateListEntry();
             }
 
-            public bool IsReplicationComplete
-            {
-                get { return (this.PendingReplicationContext == null || this.PendingReplicationContext.IsReplicationComplete); }
-            }
+            public bool IsReplicationComplete => this.PendingReplicationContext?.IsReplicationComplete ?? true;
 
-            public bool IsFailed
-            {
-                get
-                {
-                    if (this.PendingReplicationContext != null)
-                    {
-                        return this.PendingReplicationContext.IsFailed;
-                    }
+            public bool IsFailed => this.PendingReplicationContext?.IsFailed ?? false;
 
-                    return false;
-                }
-            }
-
-            public ActorStateDataWrapper ActorStateDataWrapper { get; private set; }
+            public ActorStateDataWrapper ActorStateDataWrapper { get; }
 
             private ReplicationContext PendingReplicationContext { get; set; }
 
             public void CompleteReplication()
             {
-                if (this.PendingReplicationContext != null)
-                {
-                    this.PendingReplicationContext.CompleteListEntry();
-                    this.PendingReplicationContext = null;
-                }
+                this.PendingReplicationContext?.CompleteListEntry();
+                this.PendingReplicationContext = null;
             }
         }
 
-        private class TableEntry
+#pragma warning disable SA1201 // Elements should appear in the correct order
+        private readonly struct TableEntry
         {
             public TableEntry(
                 ActorStateDataWrapper actorStateDataWrapper,
@@ -701,9 +584,8 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
                 this.ListNode = listNode;
             }
 
-            public ActorStateDataWrapper ActorStateDataWrapper { get; private set; }
-
-            public LinkedListNode<ListEntry> ListNode { get; private set; }
+            public readonly ActorStateDataWrapper ActorStateDataWrapper;
+            public readonly LinkedListNode<ListEntry> ListNode;
         }
 
         #endregion Private inner classes

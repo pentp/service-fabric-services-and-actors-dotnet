@@ -45,10 +45,8 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
 
             Requires.Argument("stateName", stateName).NotNull();
 
-            if (this.stateChangeTracker.ContainsKey(stateName))
+            if (this.stateChangeTracker.TryGetValue(stateName, out var stateMetadata))
             {
-                var stateMetadata = this.stateChangeTracker[stateName];
-
                 // Check if the property was marked as remove in the cache
                 if (stateMetadata.ChangeKind == StateChangeKind.Remove)
                 {
@@ -86,10 +84,8 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
 
             Requires.Argument("stateName", stateName).NotNull();
 
-            if (this.stateChangeTracker.ContainsKey(stateName))
+            if (this.stateChangeTracker.TryGetValue(stateName, out var stateMetadata))
             {
-                var stateMetadata = this.stateChangeTracker[stateName];
-
                 // Check if the property was marked as remove in the cache
                 if (stateMetadata.ChangeKind == StateChangeKind.Remove)
                 {
@@ -114,9 +110,8 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
 
             Requires.Argument("stateName", stateName).NotNull();
 
-            if (this.stateChangeTracker.ContainsKey(stateName))
+            if (this.stateChangeTracker.TryGetValue(stateName, out var stateMetadata))
             {
-                var stateMetadata = this.stateChangeTracker[stateName];
                 stateMetadata.Value = value;
 
                 if (stateMetadata.ChangeKind == StateChangeKind.None ||
@@ -149,10 +144,8 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
 
             Requires.Argument("stateName", stateName).NotNull();
 
-            if (this.stateChangeTracker.ContainsKey(stateName))
+            if (this.stateChangeTracker.TryGetValue(stateName, out var stateMetadata))
             {
-                var stateMetadata = this.stateChangeTracker[stateName];
-
                 switch (stateMetadata.ChangeKind)
                 {
                     case StateChangeKind.Remove:
@@ -175,26 +168,19 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
             return false;
         }
 
-        public async Task<bool> ContainsStateAsync(string stateName, CancellationToken cancellationToken)
+        public Task<bool> ContainsStateAsync(string stateName, CancellationToken cancellationToken)
         {
             this.ThrowIfClosed();
 
             Requires.Argument("stateName", stateName).NotNull();
 
-            if (this.stateChangeTracker.ContainsKey(stateName))
+            if (this.stateChangeTracker.TryGetValue(stateName, out var stateMetadata))
             {
-                var stateMetadata = this.stateChangeTracker[stateName];
-
                 // Check if the property was marked as remove in the cache
-                return stateMetadata.ChangeKind != StateChangeKind.Remove;
+                return Task.FromResult(stateMetadata.ChangeKind != StateChangeKind.Remove);
             }
 
-            if (await this.stateProvider.ContainsStateAsync(this.actor.Id, stateName, cancellationToken))
-            {
-                return true;
-            }
-
-            return false;
+            return this.stateProvider.ContainsStateAsync(this.actor.Id, stateName, cancellationToken);
         }
 
         public async Task<T> GetOrAddStateAsync<T>(string stateName, T value, CancellationToken cancellationToken)
@@ -222,10 +208,8 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
 
             Requires.Argument("stateName", stateName).NotNull();
 
-            if (this.stateChangeTracker.ContainsKey(stateName))
+            if (this.stateChangeTracker.TryGetValue(stateName, out var stateMetadata))
             {
-                var stateMetadata = this.stateChangeTracker[stateName];
-
                 // Check if the property was marked as remove in the cache
                 if (stateMetadata.ChangeKind == StateChangeKind.Remove)
                 {
@@ -264,17 +248,15 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
             var namesFromStateProvider = await this.stateProvider.EnumerateStateNamesAsync(this.actor.Id, cancellationToken);
             var stateNameList = new List<string>(namesFromStateProvider);
 
-            var kvPairEnumerator = this.stateChangeTracker.GetEnumerator();
-
-            while (kvPairEnumerator.MoveNext())
+            foreach (var kvPair in this.stateChangeTracker)
             {
-                switch (kvPairEnumerator.Current.Value.ChangeKind)
+                switch (kvPair.Value.ChangeKind)
                 {
                     case StateChangeKind.Add:
-                        stateNameList.Add(kvPairEnumerator.Current.Key);
+                        stateNameList.Add(kvPair.Key);
                         break;
                     case StateChangeKind.Remove:
-                        stateNameList.Remove(kvPairEnumerator.Current.Key);
+                        stateNameList.Remove(kvPair.Key);
                         break;
                 }
             }
@@ -297,18 +279,17 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
                 var stateChangeList = new List<ActorStateChange>();
                 var statesToRemove = new List<string>();
 
-                foreach (var stateName in this.stateChangeTracker.Keys)
+                foreach (var kvPair in this.stateChangeTracker)
                 {
-                    var stateMetadata = this.stateChangeTracker[stateName];
-
+                    var stateMetadata = kvPair.Value;
                     if (stateMetadata.ChangeKind != StateChangeKind.None)
                     {
                         stateChangeList.Add(
-                            new ActorStateChange(stateName, stateMetadata.Type, stateMetadata.Value, stateMetadata.ChangeKind));
+                            new ActorStateChange(kvPair.Key, stateMetadata.Type, stateMetadata.Value, stateMetadata.ChangeKind));
 
                         if (stateMetadata.ChangeKind == StateChangeKind.Remove)
                         {
-                            statesToRemove.Add(stateName);
+                            statesToRemove.Add(kvPair.Key);
                         }
 
                         stateMetadata.ChangeKind = StateChangeKind.None;
@@ -319,7 +300,7 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
                 {
                     this.actor.Manager.DiagnosticsEventManager.SaveActorStateStart(this.actor);
 
-                    await this.stateProvider.SaveStateAsync(this.actor.Id, stateChangeList.AsReadOnly(), cancellationToken);
+                    await this.stateProvider.SaveStateAsync(this.actor.Id, stateChangeList, cancellationToken);
 
                     this.actor.Manager.DiagnosticsEventManager.SaveActorStateFinish(this.actor);
                 }
@@ -335,13 +316,8 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
 
         private bool IsStateMarkedForRemove(string stateName)
         {
-            if (this.stateChangeTracker.ContainsKey(stateName) &&
-                this.stateChangeTracker[stateName].ChangeKind == StateChangeKind.Remove)
-            {
-                return true;
-            }
-
-            return false;
+            return this.stateChangeTracker.TryGetValue(stateName, out var stateMetadata) &&
+                stateMetadata.ChangeKind == StateChangeKind.Remove;
         }
 
         private async Task<ConditionalValue<T>> TryGetStateFromStateProviderAsync<T>(string stateName, CancellationToken cancellationToken)

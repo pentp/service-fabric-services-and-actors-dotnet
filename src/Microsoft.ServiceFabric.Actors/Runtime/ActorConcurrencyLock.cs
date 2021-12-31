@@ -96,7 +96,7 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
                 // The received callContext is of form callContext1callContext2callContext3...
                 // thus to check if incoming call was made from the current calls in progress
                 // we need to check if the incoming call context starts with the currentCallContext
-                var startsWith = incomingCallContext.StartsWith(this.currentCallContext);
+                var startsWith = incomingCallContext.StartsWith(this.currentCallContext, StringComparison.Ordinal);
 
                 if (startsWith)
                 {
@@ -216,7 +216,7 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
             try
             {
                 // this call must be part of the original call chain
-                if (callContext.StartsWith(this.currentCallContext))
+                if (callContext.StartsWith(this.currentCallContext, StringComparison.Ordinal))
                 {
                     if (this.currentCallCount > 0)
                     {

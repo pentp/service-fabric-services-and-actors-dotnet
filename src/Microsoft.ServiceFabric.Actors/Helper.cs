@@ -6,7 +6,6 @@
 namespace Microsoft.ServiceFabric.Actors
 {
     using System;
-    using System.Globalization;
     using Microsoft.ServiceFabric.Actors.Remoting;
 
     internal class Helper
@@ -15,11 +14,7 @@ namespace Microsoft.ServiceFabric.Actors
         {
             if (ActorLogicalCallContext.TryGet(out var callContextValue))
             {
-                return string.Format(
-                    CultureInfo.InvariantCulture,
-                    "{0}{1}",
-                    callContextValue,
-                    Guid.NewGuid().ToString());
+                return callContextValue + Guid.NewGuid().ToString();
             }
             else
             {

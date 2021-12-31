@@ -196,7 +196,7 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
                     await
                         actor.ConcurrencyLock.Acquire(
                             callContext,
-                            async innerActor => await this.HandleDirtyStateAsync(innerActor),
+                            this.HandleDirtyStateAsync,
                             cancellationToken);
                 }
                 catch
@@ -372,7 +372,7 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
                     // Though space occupied by entry is small, for application that
                     // create and delete actors at high frequency, this will start
                     // piling up redundant memory until the current primary failover happens.
-                    if (actorReminders.Count == 0)
+                    if (actorReminders.IsEmpty)
                     {
                         this.remindersByActorId.TryRemove(actorId, out actorReminders);
                     }
@@ -505,7 +505,7 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
                 await
                     actor.ConcurrencyLock.Acquire(
                         callContext,
-                        (async innerActor => await this.HandleDirtyStateAsync(innerActor)),
+                        this.HandleDirtyStateAsync,
                         ActorReentrancyMode.Disallowed,
                         cancellationToken);
 
@@ -550,7 +550,7 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
 
                         if (this.remindersByActorId.TryGetValue(actorId, out var actorReminders))
                         {
-                            var reminderNames = actorReminders.Values.Select(r => r.Name).ToList().AsReadOnly();
+                            var reminderNames = actorReminders.Select(r => r.Value.Name).ToList();
 
                             foreach (var reminderName in reminderNames)
                             {
@@ -944,7 +944,7 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
             {
                 if (!this.activeActors.TryGetValue(actorId, out var actor))
                 {
-                    actor = this.activeActors.GetOrAdd(actorId, l => this.CreateActor(actorId, createDummyActor));
+                    actor = this.activeActors.GetOrAdd(actorId, actorId => this.CreateActor(actorId, createDummyActor));
                 }
 
                 scope = ActorUseScope.TryCreate(actor, timerUse);
@@ -993,7 +993,7 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
                     }
                 }
 
-                if (this.isClosed && (this.activeActors.Count == 0))
+                if (this.isClosed && this.activeActors.IsEmpty)
                 {
                     // all actors are garbaged collected and we are closed
                     // no need to schedule the timer again.
@@ -1123,37 +1123,35 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
                     e.ToString());
             }
 
-            var remindersForActor = this.remindersByActorId.Values;
             ActorTrace.Source.WriteInfoWithId(
                 TraceType,
                 this.traceId,
                 "CleanupRemindersAsync: Disposing reminders for {0} actors.",
-                remindersForActor.Count);
+                this.remindersByActorId.Count);
 
-            foreach (var reminders in this.remindersByActorId.Values)
+            foreach (var kv in this.remindersByActorId)
             {
-                var allReminders = reminders.Values;
-
-                if (allReminders.Count > 0)
+                var reminders = kv.Value;
+                if (!reminders.IsEmpty)
                 {
-                    var actorId = allReminders.First().OwnerActorId;
+                    var actorId = kv.Key;
                     ActorTrace.Source.WriteInfoWithId(
                         TraceType,
                         this.traceId,
                         "CleanupRemindersAsync: Disposing {0} reminders for actor with Id {1}",
-                        allReminders.Count,
+                        reminders.Count,
                         actorId.ToString());
 
-                    foreach (var reminder in allReminders)
+                    foreach (var reminder in reminders)
                     {
-                        reminder.Dispose();
+                        reminder.Value.Dispose();
                     }
 
                     ActorTrace.Source.WriteInfoWithId(
                         TraceType,
                         this.traceId,
                         "CleanupRemindersAsync: Disposed {0} reminders for actor with id {1}",
-                        allReminders.Count,
+                        reminders.Count,
                         actorId.ToString());
                 }
             }

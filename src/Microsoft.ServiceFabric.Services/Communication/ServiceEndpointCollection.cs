@@ -137,16 +137,9 @@ namespace Microsoft.ServiceFabric.Services.Communication
         /// <returns>True if an endpoint with the listener name exists, False otherwise</returns>
         public bool TryGetEndpointAddress(string listenerName, out string endpointAddress)
         {
-            endpointAddress = null;
             lock (this.endpointsLock)
             {
-                if (!this.endpoints.ContainsKey(listenerName))
-                {
-                    return false;
-                }
-
-                endpointAddress = this.endpoints[listenerName];
-                return true;
+                return this.endpoints.TryGetValue(listenerName, out endpointAddress);
             }
         }
 
@@ -166,7 +159,7 @@ namespace Microsoft.ServiceFabric.Services.Communication
                 var stream = new MemoryStream();
                 serializer.WriteObject(stream, this);
 
-                return Encoding.UTF8.GetString(stream.ToArray());
+                return Encoding.UTF8.GetString(stream.GetBuffer(), 0, (int)stream.Length);
             }
             else
             {

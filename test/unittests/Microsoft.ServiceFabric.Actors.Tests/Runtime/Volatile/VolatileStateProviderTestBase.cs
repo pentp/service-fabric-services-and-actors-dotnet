@@ -562,14 +562,14 @@ namespace Microsoft.ServiceFabric.Actors.Tests.Runtime.Volatile
         {
             var replicationUnits = new List<ReplicationUnit>();
 
-            while (enumerator.PeekNext() != null)
+            while (enumerator.PeekNext() is { } peek)
             {
-                var peek = enumerator.PeekNext();
                 var replicationUnit = new ReplicationUnit(peek.SequenceNumber, peek.Type);
 
                 do
                 {
-                    replicationUnit.ActorStateDataWrapperList.Add(enumerator.GetNext());
+                    enumerator.MoveNext();
+                    replicationUnit.ActorStateDataWrapperList.Add(peek);
                     peek = enumerator.PeekNext();
                 }
                 while (peek != null && peek.SequenceNumber == replicationUnit.SequenceNumber);

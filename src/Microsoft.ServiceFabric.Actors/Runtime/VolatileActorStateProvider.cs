@@ -18,6 +18,7 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
     using Microsoft.ServiceFabric.Actors.Generator;
     using Microsoft.ServiceFabric.Actors.Query;
     using Microsoft.ServiceFabric.Data;
+    using Microsoft.ServiceFabric.Services.Common;
     using ActorStateDataWrapper = VolatileActorStateTable<
         VolatileActorStateProvider.ActorStateType,
         string,
@@ -172,21 +173,20 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
         /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
         /// <exception cref="OperationCanceledException">The operation was canceled.</exception>
         /// <returns> A task that represents the asynchronous Actor activation notification processing.</returns>
-        async Task IActorStateProvider.ActorActivatedAsync(ActorId actorId, CancellationToken cancellationToken)
+        Task IActorStateProvider.ActorActivatedAsync(ActorId actorId, CancellationToken cancellationToken)
         {
             var key = ActorStateProviderHelper.CreateActorPresenceStorageKey(actorId);
 
             if (!this.stateTable.TryGetValue(ActorStateType.Actor, key, out var data))
             {
-                await this.actorStateProviderHelper.ExecuteWithRetriesAsync(
-                    () =>
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        return this.ReplicateUpdateAsync(ActorStateType.Actor, key, ActorPresenceValue);
-                    },
+                var list = CreateUpdateList(ActorStateType.Actor, key, ActorPresenceValue);
+                return this.actorStateProviderHelper.ExecuteWithRetriesAsync(
+                    () => this.ReplicateStateChangesAsync(list, cancellationToken),
                     string.Format("ActorActivatedAsync[{0}]", actorId),
                     cancellationToken);
             }
+
+            return TaskDone.Done;
         }
 
         /// <summary>
@@ -205,12 +205,9 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
             var reminderCompletedData = new ReminderCompletedData(this.logicalTimeManager.CurrentLogicalTime, DateTime.UtcNow);
             var actorStateData = new ActorStateData(reminderCompletedData);
 
+            var list = CreateUpdateList(ActorStateType.Actor, reminderCompletedKey, actorStateData);
             return this.actorStateProviderHelper.ExecuteWithRetriesAsync(
-                () =>
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    return this.ReplicateUpdateAsync(ActorStateType.Actor, reminderCompletedKey, actorStateData);
-                },
+                () => this.ReplicateStateChangesAsync(list, cancellationToken),
                 string.Format("ReminderCallbackCompletedAsync[{0}]", actorId),
                 cancellationToken);
         }
@@ -259,7 +256,7 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
         /// When <see cref="StateChangeKind"/> is <see cref="StateChangeKind.None"/>
         /// </exception>
         /// <exception cref="OperationCanceledException">The operation was canceled.</exception>
-        async Task IActorStateProvider.SaveStateAsync(ActorId actorId, IReadOnlyCollection<ActorStateChange> stateChanges, CancellationToken cancellationToken)
+        Task IActorStateProvider.SaveStateAsync(ActorId actorId, IReadOnlyCollection<ActorStateChange> stateChanges, CancellationToken cancellationToken)
         {
             var actorStateDataWrapperList = new List<ActorStateDataWrapper>();
 
@@ -281,15 +278,13 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
 
             if (actorStateDataWrapperList.Count > 0)
             {
-                await this.actorStateProviderHelper.ExecuteWithRetriesAsync(
-                    async () =>
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        await this.ReplicateStateChangesAsync(actorStateDataWrapperList);
-                    },
+                return this.actorStateProviderHelper.ExecuteWithRetriesAsync(
+                    () => this.ReplicateStateChangesAsync(actorStateDataWrapperList, cancellationToken),
                     string.Format("SaveStateAsync[{0}]", actorId),
                     cancellationToken);
             }
+
+            return TaskDone.Done;
         }
 
         /// <summary>
@@ -310,12 +305,7 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
 
             var key = CreateActorStorageKey(actorId, stateName);
 
-            if (this.stateTable.TryGetValue(ActorStateType.Actor, key, out var data))
-            {
-                return Task.FromResult(true);
-            }
-
-            return Task.FromResult(false);
+            return Task.FromResult(this.stateTable.TryGetValue(ActorStateType.Actor, key, out _));
         }
 
         /// <summary>
@@ -325,42 +315,35 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
         /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
         /// <returns>A task that represents the asynchronous remove operation.</returns>
         /// <exception cref="OperationCanceledException">The operation was canceled.</exception>
-        async Task IActorStateProvider.RemoveActorAsync(ActorId actorId, CancellationToken cancellationToken)
+        Task IActorStateProvider.RemoveActorAsync(ActorId actorId, CancellationToken cancellationToken)
         {
             var actorStateDataWrapperList = new List<ActorStateDataWrapper>();
 
-            ActorStateDataWrapper actorStateDataWrapper;
-
             // Actor keys to delete
-            var actorStorageKeyPrefix = CreateActorStorageKeyPrefix(actorId, string.Empty);
+            var actorStorageKeyPrefix = CreateActorStorageKeyPrefix(actorId);
 
             // Reminder last completed keys to delete
             var reminderCompletedKeyPrefix = ActorStateProviderHelper.CreateReminderCompletedStorageKeyPrefix(actorId);
 
-            var actorStateEnumerator = this.stateTable.GetShallowCopiesEnumerator(ActorStateType.Actor);
-
-            while ((actorStateDataWrapper = actorStateEnumerator.GetNext()) != null)
+            foreach (var k in this.stateTable.GetActorStateKeys(ActorStateType.Actor))
             {
-                if (actorStateDataWrapper.Key == actorStorageKeyPrefix ||
-                    actorStateDataWrapper.Key.StartsWith(actorStorageKeyPrefix + "_") ||
-                    actorStateDataWrapper.Key.StartsWith(reminderCompletedKeyPrefix))
+                if ((k.StartsWith(actorStorageKeyPrefix, StringComparison.Ordinal) && (k.Length == actorStorageKeyPrefix.Length || k[actorStorageKeyPrefix.Length] == '_')) ||
+                    k.StartsWith(reminderCompletedKeyPrefix, StringComparison.Ordinal))
                 {
                     actorStateDataWrapperList.Add(
-                        ActorStateDataWrapper.CreateForDelete(ActorStateType.Actor, actorStateDataWrapper.Key));
+                        ActorStateDataWrapper.CreateForDelete(ActorStateType.Actor, k));
                 }
             }
 
             // Reminder keys to delete
-            var reminderStorgaeKeyPrefix = CreateReminderStorageKeyPrefix(actorId, string.Empty);
+            var reminderStorgaeKeyPrefix = CreateReminderStorageKeyPrefix(actorId);
 
-            var reminderEnumerator = this.stateTable.GetShallowCopiesEnumerator(ActorStateType.Reminder);
-
-            while ((actorStateDataWrapper = reminderEnumerator.GetNext()) != null)
+            foreach (var k in this.stateTable.GetActorStateKeys(ActorStateType.Reminder))
             {
-                if (actorStateDataWrapper.Key.StartsWith(reminderStorgaeKeyPrefix))
+                if (k.StartsWith(reminderStorgaeKeyPrefix, StringComparison.Ordinal))
                 {
                     actorStateDataWrapperList.Add(
-                        ActorStateDataWrapper.CreateForDelete(ActorStateType.Reminder, actorStateDataWrapper.Key));
+                        ActorStateDataWrapper.CreateForDelete(ActorStateType.Reminder, k));
                 }
             }
 
@@ -370,15 +353,13 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
 
             if (actorStateDataWrapperList.Count > 0)
             {
-                await this.actorStateProviderHelper.ExecuteWithRetriesAsync(
-                    async () =>
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        await this.ReplicateStateChangesAsync(actorStateDataWrapperList);
-                    },
+                return this.actorStateProviderHelper.ExecuteWithRetriesAsync(
+                    () => this.ReplicateStateChangesAsync(actorStateDataWrapperList, cancellationToken),
                     string.Format("RemoveActorAsync[{0}]", actorId),
                     cancellationToken);
             }
+
+            return TaskDone.Done;
         }
 
         /// <summary>
@@ -399,18 +380,13 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
         Task<IEnumerable<string>> IActorStateProvider.EnumerateStateNamesAsync(ActorId actorId, CancellationToken cancellationToken)
         {
             var stateNameList = new List<string>();
-            var storageKeyPrefix = CreateActorStorageKeyPrefix(actorId, string.Empty);
+            var storageKeyPrefix = CreateActorStorageKeyPrefix(actorId);
 
-            var actorStateEnumerator = this.stateTable.GetShallowCopiesEnumerator(ActorStateType.Actor);
-
-            ActorStateTable.ActorStateDataWrapper actorStateDataWrapper;
-
-            while ((actorStateDataWrapper = actorStateEnumerator.GetNext()) != null)
+            foreach (var k in this.stateTable.GetActorStateKeys(ActorStateType.Actor))
             {
-                if (actorStateDataWrapper.Key == storageKeyPrefix ||
-                    actorStateDataWrapper.Key.StartsWith(storageKeyPrefix + "_"))
+                if (k.StartsWith(storageKeyPrefix, StringComparison.Ordinal) && (k.Length == storageKeyPrefix.Length || k[storageKeyPrefix.Length] == '_'))
                 {
-                    stateNameList.Add(ExtractStateName(actorId, actorStateDataWrapper.Key));
+                    stateNameList.Add(k.Length == storageKeyPrefix.Length ? string.Empty : k.Substring(storageKeyPrefix.Length + 1));
                 }
             }
 
@@ -445,7 +421,7 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
                 continuationToken,
                 () => this.stateTable.GetSortedStorageKeyEnumerator(
                     ActorStateType.Actor,
-                    key => key.StartsWith(ActorStateProviderHelper.ActorPresenceStorageKeyPrefix)),
+                    key => key.StartsWith(ActorStateProviderHelper.ActorPresenceStorageKeyPrefix, StringComparison.Ordinal)),
                 storageKey => storageKey,
                 cancellationToken);
         }
@@ -462,7 +438,7 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
         /// <exception cref="OperationCanceledException">The operation was canceled.</exception>
         Task IActorStateProvider.SaveReminderAsync(ActorId actorId, IActorReminder reminder, CancellationToken cancellationToken)
         {
-            var actorStateDataWrapperList = new List<ActorStateDataWrapper>
+            var actorStateDataWrapperList = new List<ActorStateDataWrapper>(2)
             {
                 ActorStateDataWrapper.CreateForUpdate(
                     ActorStateType.Reminder,
@@ -475,11 +451,7 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
             };
 
             return this.actorStateProviderHelper.ExecuteWithRetriesAsync(
-                () =>
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    return this.ReplicateStateChangesAsync(actorStateDataWrapperList);
-                },
+                () => this.ReplicateStateChangesAsync(actorStateDataWrapperList, cancellationToken),
                 string.Format("SaveReminderAsync[{0}]", actorId),
                 cancellationToken);
         }
@@ -494,7 +466,7 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
         /// <exception cref="OperationCanceledException">The operation was canceled.</exception>
         Task IActorStateProvider.DeleteReminderAsync(ActorId actorId, string reminderName, CancellationToken cancellationToken)
         {
-            var actorStateDataWrapperList = new List<ActorStateDataWrapper>
+            var actorStateDataWrapperList = new List<ActorStateDataWrapper>(2)
             {
                 ActorStateDataWrapper.CreateForDelete(
                     ActorStateType.Reminder,
@@ -506,11 +478,7 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
             };
 
             return this.actorStateProviderHelper.ExecuteWithRetriesAsync(
-                () =>
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    return this.ReplicateStateChangesAsync(actorStateDataWrapperList);
-                },
+                () => this.ReplicateStateChangesAsync(actorStateDataWrapperList, cancellationToken),
                 string.Format("DeleteReminderAsync[{0}]", actorId),
                 cancellationToken);
         }
@@ -530,15 +498,11 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
 
             if (actorStateDataWrapperList.Count == 0)
             {
-                return Task.FromResult(true);
+                return TaskDone.Done;
             }
 
             return this.actorStateProviderHelper.ExecuteWithRetriesAsync(
-                () =>
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    return this.ReplicateStateChangesAsync(actorStateDataWrapperList);
-                },
+                () => this.ReplicateStateChangesAsync(actorStateDataWrapperList, cancellationToken),
                 $"DeleteRemindersAsync[{actorStateDataWrapperList.Count / 2}]",
                 cancellationToken);
         }
@@ -555,11 +519,11 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
         Task<IActorReminderCollection> IActorStateProvider.LoadRemindersAsync(CancellationToken cancellationToken)
         {
             var reminderCollection = new ActorReminderCollection();
-            var stateDictionary = this.stateTable.GetActorStateDictionary(ActorStateType.Reminder);
+            var stateList = this.stateTable.GetActorStateValues(ActorStateType.Reminder);
 
-            foreach (var kvPair in stateDictionary)
+            foreach (var actorState in stateList)
             {
-                var reminderData = kvPair.Value.ActorReminderData;
+                var reminderData = actorState.ActorReminderData;
 
                 if (reminderData == null)
                 {
@@ -951,7 +915,7 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
             CancellationToken cancellationToken)
         {
             // no-op
-            return Task.FromResult(true);
+            return TaskDone.Done;
         }
 
         /// <inheritdoc/>
@@ -959,10 +923,8 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
         {
             try
             {
-                await this.ReplicateUpdateAsync(
-                    ActorStateType.LogicalTimestamp,
-                    LogicalTimestampKey,
-                    new ActorStateData(currentLogicalTime));
+                var list = CreateUpdateList(ActorStateType.LogicalTimestamp, LogicalTimestampKey, new ActorStateData(currentLogicalTime));
+                await this.ReplicateStateChangesAsync(list, default);
             }
             catch (Exception)
             {
@@ -974,14 +936,12 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
             DataContractSerializer serializer,
             CopyOrReplicationOperation copyOrReplicationOperation)
         {
-            using (var memoryStream = new MemoryStream())
-            {
-                var binaryWriter = XmlDictionaryWriter.CreateBinaryWriter(memoryStream);
-                serializer.WriteObject(binaryWriter, copyOrReplicationOperation);
-                binaryWriter.Flush();
+            var memoryStream = new MemoryStream();
+            var binaryWriter = XmlDictionaryWriter.CreateBinaryWriter(memoryStream);
+            serializer.WriteObject(binaryWriter, copyOrReplicationOperation);
+            binaryWriter.Flush();
 
-                return new OperationData(memoryStream.ToArray());
-            }
+            return new OperationData(new ArraySegment<byte>(memoryStream.GetBuffer(), 0, (int)memoryStream.Length));
         }
 
         internal static DataContractSerializer CreateCopyOrReplicationOperationSerializer()
@@ -991,13 +951,10 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
 
         private static string CreateReminderStorageKey(ActorId actorId, string reminderName)
         {
-            return string.Format(CultureInfo.InvariantCulture, "{0}_{1}", actorId.GetStorageKey(), reminderName);
+            return $"{actorId.GetStorageKey()}_{reminderName}";
         }
 
-        private static string CreateReminderStorageKeyPrefix(ActorId actorId, string reminderNamePrefix)
-        {
-            return CreateReminderStorageKey(actorId, reminderNamePrefix);
-        }
+        private static string CreateReminderStorageKeyPrefix(ActorId actorId) => CreateReminderStorageKey(actorId, null);
 
         private static string CreateActorStorageKey(ActorId actorId, string stateName)
         {
@@ -1007,24 +964,14 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
                 return actorId.GetStorageKey();
             }
 
-            return string.Format(CultureInfo.InvariantCulture, "{0}_{1}", actorId.GetStorageKey(), stateName);
+            return $"{actorId.GetStorageKey()}_{stateName}";
         }
 
-        private static string CreateActorStorageKeyPrefix(ActorId actorId, string stateNamePrefix)
+        private static string CreateActorStorageKeyPrefix(ActorId actorId) => CreateActorStorageKey(actorId, null);
+
+        private static List<ActorStateDataWrapper> CreateUpdateList(ActorStateType type, string key, ActorStateData data)
         {
-            return CreateActorStorageKey(actorId, stateNamePrefix);
-        }
-
-        private static string ExtractStateName(ActorId actorId, string storageKey)
-        {
-            var storageKeyPrefix = CreateActorStorageKeyPrefix(actorId, string.Empty);
-
-            if (storageKey == storageKeyPrefix)
-            {
-                return string.Empty;
-            }
-
-            return storageKey.Substring(storageKeyPrefix.Length + 1);
+            return new List<ActorStateDataWrapper>(1) { ActorStateDataWrapper.CreateForUpdate(type, key, data) };
         }
 
         private void LoadActorStateProviderSettings()
@@ -1122,22 +1069,12 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
             }
         }
 
-        private Task ReplicateUpdateAsync(ActorStateType type, string key, ActorStateData data)
+        private async Task ReplicateStateChangesAsync(List<ActorStateDataWrapper> actorStateDataWrapperList, CancellationToken cancellationToken)
         {
-            return this.ReplicateStateChangesAsync(ActorStateTable.ActorStateDataWrapper.CreateForUpdate(type, key, data));
-        }
+            cancellationToken.ThrowIfCancellationRequested();
 
-        private Task ReplicateStateChangesAsync(ActorStateDataWrapper actorStateDataWrapper)
-        {
-            var actorStateDataWrapperList = new[] { actorStateDataWrapper };
-            return this.ReplicateStateChangesAsync(actorStateDataWrapperList);
-        }
-
-        private async Task ReplicateStateChangesAsync(IEnumerable<ActorStateDataWrapper> actorStateDataWrapperList)
-        {
             Task replicationTask;
             long sequenceNumber;
-            Exception replicationException = null;
 
             var operationData = SerializeToOperationData(
                 this.copyOrReplicationOperationSerializer,
@@ -1150,18 +1087,21 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
                 // to IStateProvider.GetCopyState() with this sequence number.
                 replicationTask = this.stateReplicator.ReplicateAsync(
                     operationData,
-                    CancellationToken.None,
+                    cancellationToken,
                     out sequenceNumber);
 
                 // We add this state to uncommitted list entries before releasing the
                 // lock. A call to IStateProvider.GetCopyState() can come before we
                 // have executed this which will then block on this.replicationLock.
                 this.stateTable.PrepareUpdate(actorStateDataWrapperList, sequenceNumber);
+                actorStateDataWrapperList = null;
             }
 
+            Exception replicationException;
             try
             {
                 await replicationTask;
+                replicationException = null;
             }
             catch (Exception ex)
             {
@@ -1305,14 +1245,14 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
 
             private void GroupActorStateDataBySequenceNumber(ActorStateTable.ActorStateEnumerator actorStateEnumerator)
             {
-                while (actorStateEnumerator.PeekNext() != null)
+                while (actorStateEnumerator.PeekNext() is { } peek)
                 {
-                    var peek = actorStateEnumerator.PeekNext();
                     var copyStateDataWrapper = new CopyStateData(peek.SequenceNumber);
 
                     do
                     {
-                        copyStateDataWrapper.ActorStateDataWrapperList.Add(actorStateEnumerator.GetNext());
+                        actorStateEnumerator.MoveNext();
+                        copyStateDataWrapper.ActorStateDataWrapperList.Add(peek);
                         peek = actorStateEnumerator.PeekNext();
                     }
                     while (peek != null && peek.SequenceNumber == copyStateDataWrapper.SequenceNumber);
@@ -1396,13 +1336,7 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
                 this.pumpTask = this.PumpLoop(false);
             }
 
-            public async Task WaitForPumpCompletionAsync()
-            {
-                if (this.pumpTask != null)
-                {
-                    await this.pumpTask;
-                }
-            }
+            public Task WaitForPumpCompletionAsync() => this.pumpTask ?? TaskDone.Done;
 
             private async Task PumpLoop(bool isCopy)
             {
@@ -1424,15 +1358,13 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
 
                         if (operation != null)
                         {
-                            using (var memoryStream = new MemoryStream(operation.Data[0].Array))
-                            {
-                                var binaryReader = XmlDictionaryReader.CreateBinaryReader(
-                                    memoryStream,
-                                    XmlDictionaryReaderQuotas.Max);
+                            var data = operation.Data[0];
+                            var memoryStream = new MemoryStream(data.Array, data.Offset, data.Count);
+                            var binaryReader = XmlDictionaryReader.CreateBinaryReader(
+                                memoryStream,
+                                XmlDictionaryReaderQuotas.Max);
 
-                                this.DeserializeAndApply(binaryReader, operation, isCopy);
-                            }
-
+                            this.DeserializeAndApply(binaryReader, operation, isCopy);
                             operation.Acknowledge();
                         }
                         else

@@ -89,18 +89,7 @@ namespace Microsoft.ServiceFabric.Actors
         /// <returns>true if the id and <see cref="ActorIdKind"/> is same for both objects; otherwise, false.</returns>
         public static bool operator ==(ActorId x, ActorId y)
         {
-            if (ReferenceEquals(x, null) && ReferenceEquals(y, null))
-            {
-                return true;
-            }
-            else if (ReferenceEquals(x, null) || ReferenceEquals(y, null))
-            {
-                return false;
-            }
-            else
-            {
-                return EqualsContents(x, y);
-            }
+            return x is null ? y is null : y is { } && EqualsContents(x, y);
         }
 
         /// <summary>
@@ -215,7 +204,7 @@ namespace Microsoft.ServiceFabric.Actors
                 return key.Value;
             }
 
-            long keyValue = 0;
+            long keyValue;
             switch (this.kind)
             {
                 case ActorIdKind.Long:
@@ -232,7 +221,7 @@ namespace Microsoft.ServiceFabric.Actors
 
                 default:
                     ReleaseAssert.Failfast("The ActorIdKind value {0} is invalid", this.kind);
-                    break;
+                    throw null; // unreachable code
             }
 
             this.partitionKey = keyValue;
@@ -250,7 +239,7 @@ namespace Microsoft.ServiceFabric.Actors
                 return this.stringRepresentation;
             }
 
-            var actorIdAsString = string.Empty;
+            string actorIdAsString;
             switch (this.kind)
             {
                 case ActorIdKind.Long:
@@ -267,7 +256,7 @@ namespace Microsoft.ServiceFabric.Actors
 
                 default:
                     ReleaseAssert.Failfast("The ActorIdKind value {0} is invalid", this.kind);
-                    break;
+                    throw null;
             }
 
             this.stringRepresentation = actorIdAsString;
@@ -293,7 +282,7 @@ namespace Microsoft.ServiceFabric.Actors
 
                 default:
                     ReleaseAssert.Failfast("The ActorIdKind value {0} is invalid", this.kind);
-                    return 0; // this fails the process, so unreachable code
+                    throw null; // unreachable code
             }
         }
 
@@ -306,18 +295,7 @@ namespace Microsoft.ServiceFabric.Actors
         /// otherwise, false. If obj is null, the method returns false.</returns>
         public override bool Equals(object obj)
         {
-            if (ReferenceEquals(obj, null))
-            {
-                return false;
-            }
-            else if (obj.GetType() != typeof(ActorId))
-            {
-                return false;
-            }
-            else
-            {
-                return EqualsContents(this, (ActorId)obj);
-            }
+            return obj is ActorId id && EqualsContents(this, id);
         }
 
         /// <summary>
@@ -329,14 +307,7 @@ namespace Microsoft.ServiceFabric.Actors
         /// If other is null, the method returns false.</returns>
         public bool Equals(ActorId other)
         {
-            if (ReferenceEquals(other, null))
-            {
-                return false;
-            }
-            else
-            {
-                return EqualsContents(this, other);
-            }
+            return other is { } && EqualsContents(this, other);
         }
 
         /// <summary>
@@ -357,24 +328,19 @@ namespace Microsoft.ServiceFabric.Actors
         {
             Requires.Argument("storageKey", storageKey).NotNullOrWhiteSpace();
 
-            var idx = storageKey.IndexOf('_');
-
-            var kind = storageKey.Substring(0, idx);
-            var id = storageKey.Substring(idx + 1);
-
-            if (kind.Equals(ActorIdKind.Guid.ToString(), StringComparison.OrdinalIgnoreCase))
+            if (storageKey.StartsWith(nameof(ActorIdKind.Guid) + "_", StringComparison.OrdinalIgnoreCase))
             {
-                return new ActorId(Guid.Parse(id));
+                return new ActorId(Guid.Parse(storageKey.Substring(5)));
             }
 
-            if (kind.Equals(ActorIdKind.Long.ToString(), StringComparison.OrdinalIgnoreCase))
+            if (storageKey.StartsWith(nameof(ActorIdKind.Long) + "_", StringComparison.OrdinalIgnoreCase))
             {
-                return new ActorId(long.Parse(id));
+                return new ActorId(long.Parse(storageKey.Substring(5), CultureInfo.InvariantCulture));
             }
 
-            if (kind.Equals(ActorIdKind.String.ToString(), StringComparison.OrdinalIgnoreCase))
+            if (storageKey.StartsWith(nameof(ActorIdKind.String) + "_", StringComparison.OrdinalIgnoreCase))
             {
-                return new ActorId(id);
+                return new ActorId(storageKey.Substring(7));
             }
 
             return null;
@@ -388,25 +354,20 @@ namespace Microsoft.ServiceFabric.Actors
                 switch (this.kind)
                 {
                     case ActorIdKind.Long:
-                        key = string.Format(CultureInfo.InvariantCulture, "{0}_{1}", this.Kind.ToString(), this.longId);
+                        key = $"{nameof(ActorIdKind.Long)}_{this.longId.ToString(CultureInfo.InvariantCulture)}";
                         break;
 
                     case ActorIdKind.Guid:
-                        key = string.Format(CultureInfo.InvariantCulture, "{0}_{1}", this.Kind.ToString(), this.guidId);
+                        key = $"{nameof(ActorIdKind.Guid)}_{this.guidId.ToString()}";
                         break;
 
                     case ActorIdKind.String:
-                        key = string.Format(
-                            CultureInfo.InvariantCulture,
-                            "{0}_{1}",
-                            this.Kind.ToString(),
-                            this.stringId);
+                        key = $"{nameof(ActorIdKind.String)}_{this.stringId}";
                         break;
 
                     default:
                         ReleaseAssert.Failfast("The ActorIdKind value {0} is invalid", this.kind);
-                        key = null; // unreachable
-                        break;
+                        throw null; // unreachable
                 }
 
                 this.storageKey = key;
@@ -469,7 +430,7 @@ namespace Microsoft.ServiceFabric.Actors
 
                     default:
                         ReleaseAssert.Failfast("The ActorIdKind value {0} is invalid", x.kind);
-                        return 0; // unreachable code
+                        throw null; // unreachable code
                 }
             }
             else

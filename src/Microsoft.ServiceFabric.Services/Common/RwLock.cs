@@ -8,7 +8,7 @@ namespace Microsoft.ServiceFabric.Services.Common
     using System;
     using System.Threading;
 
-    internal class RwLock
+    internal sealed class RwLock
     {
         private readonly ReaderWriterLockSlim rwLock;
 
@@ -17,83 +17,47 @@ namespace Microsoft.ServiceFabric.Services.Common
             this.rwLock = new ReaderWriterLockSlim();
         }
 
-        public IDisposable AcquireWriteLock()
+        public DisposableWriteLock AcquireWriteLock()
         {
             return new DisposableWriteLock(this.rwLock);
         }
 
-        public IDisposable AcquireReadLock()
+        public DisposableReadLock AcquireReadLock()
         {
             return new DisposableReadLock(this.rwLock);
         }
 
-        private abstract class DisposableLockBase : IDisposable
+        public struct DisposableReadLock : IDisposable
         {
-            private readonly ReaderWriterLockSlim rwLock;
-            private bool isDisposed;
+            private ReaderWriterLockSlim rwLock;
 
-            protected DisposableLockBase(ReaderWriterLockSlim rwLock)
-            {
-                this.rwLock = rwLock;
-                this.isDisposed = false;
-            }
-
-            ~DisposableLockBase()
-            {
-                this.Dispose(false);
-            }
-
-            protected ReaderWriterLockSlim Lock
-            {
-                get { return this.rwLock; }
-            }
-
-            void IDisposable.Dispose()
-            {
-                this.Dispose(true);
-                GC.SuppressFinalize(this);
-            }
-
-            protected virtual void Dispose(bool disposing)
-            {
-                if (!this.isDisposed)
-                {
-                    this.OnDispose();
-
-                    // ignore disposing flag - no native resources
-                }
-
-                this.isDisposed = true;
-            }
-
-            protected abstract void OnDispose();
-        }
-
-        private class DisposableReadLock : DisposableLockBase
-        {
             public DisposableReadLock(ReaderWriterLockSlim rwLock)
-                : base(rwLock)
             {
-                this.Lock.EnterReadLock();
+                rwLock.EnterReadLock();
+                this.rwLock = rwLock;
             }
 
-            protected override void OnDispose()
+            public void Dispose()
             {
-                this.Lock.ExitReadLock();
+                this.rwLock?.ExitReadLock();
+                this.rwLock = null;
             }
         }
 
-        private class DisposableWriteLock : DisposableLockBase
+        public struct DisposableWriteLock : IDisposable
         {
+            private ReaderWriterLockSlim rwLock;
+
             public DisposableWriteLock(ReaderWriterLockSlim rwLock)
-                : base(rwLock)
             {
-                this.Lock.EnterWriteLock();
+                rwLock.EnterWriteLock();
+                this.rwLock = rwLock;
             }
 
-            protected override void OnDispose()
+            public void Dispose()
             {
-                this.Lock.ExitWriteLock();
+                this.rwLock?.ExitWriteLock();
+                this.rwLock = null;
             }
         }
     }

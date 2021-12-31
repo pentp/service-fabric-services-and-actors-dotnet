@@ -84,11 +84,7 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
 
         internal static string CreateActorPresenceStorageKey(ActorId actorId)
         {
-            return string.Format(
-                CultureInfo.InvariantCulture,
-                "{0}_{1}",
-                ActorPresenceStorageKeyPrefix,
-                actorId.GetStorageKey());
+            return $"{ActorPresenceStorageKeyPrefix}_{actorId.GetStorageKey()}";
         }
 
         internal static DataContractSerializer CreateDataContractSerializer(Type actorStateType)
@@ -164,42 +160,22 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
             var nodeContext = FabricRuntime.GetNodeContext();
             var endpoint = codePackage.GetEndpoint(ActorNameFormat.GetFabricServiceReplicatorEndpointName(actorImplType));
 
-            settings.ReplicatorAddress = string.Format(
-                CultureInfo.InvariantCulture,
-                "{0}:{1}",
-                nodeContext.IPAddressOrFQDN,
-                endpoint.Port);
+            settings.ReplicatorAddress = $"{nodeContext.IPAddressOrFQDN}:{endpoint.Port.ToString(CultureInfo.InvariantCulture)}";
 
-            if (!settings.MaxPrimaryReplicationQueueSize.HasValue)
-            {
-                settings.MaxPrimaryReplicationQueueSize = DefaultMaxPrimaryReplicationQueueSize;
-            }
-
-            if (!settings.MaxSecondaryReplicationQueueSize.HasValue)
-            {
-                settings.MaxSecondaryReplicationQueueSize = DefaultMaxSecondaryReplicationQueueSize;
-            }
+            settings.MaxPrimaryReplicationQueueSize ??= DefaultMaxPrimaryReplicationQueueSize;
+            settings.MaxSecondaryReplicationQueueSize ??= DefaultMaxSecondaryReplicationQueueSize;
 
             return settings;
         }
 
         internal static string CreateReminderCompletedStorageKey(ActorId actorId, string reminderName)
         {
-            return string.Format(
-                CultureInfo.InvariantCulture,
-                "{0}_{1}_{2}",
-                ReminderCompletedStorageKeyPrefix,
-                actorId.GetStorageKey(),
-                reminderName);
+            return $"{ReminderCompletedStorageKeyPrefix}_{actorId.GetStorageKey()}_{reminderName}";
         }
 
         internal static string CreateReminderCompletedStorageKeyPrefix(ActorId actorId)
         {
-            return string.Format(
-                CultureInfo.InvariantCulture,
-                "{0}_{1}_",
-                ReminderCompletedStorageKeyPrefix,
-                actorId.GetStorageKey());
+            return $"{ReminderCompletedStorageKeyPrefix}_{actorId.GetStorageKey()}_";
         }
 
         internal static ActorId GetActorIdFromPresenceStorageKey(string presenceStorageKey)
@@ -418,7 +394,6 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
             Func<T, string> getStorageKeyFunc,
             CancellationToken cancellationToken)
         {
-            var actorIdList = new List<ActorId>();
             var actorQueryResult = new PagedResult<ActorId>();
 
             // KVS enumerates its entries in alphabetical order.
@@ -454,6 +429,8 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
                 }
             }
 
+            var actorIdList = new List<ActorId>();
+
             while (enumHasMoreEntries)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -470,19 +447,20 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
                     ActorTrace.Source.WriteWarningWithId(
                         this.owner.TraceType,
                         this.owner.TraceId,
-                        string.Format("Failed to parse ActorId from storage key: {0}", storageKey));
+                        "Failed to parse ActorId from storage key: {0}",
+                        storageKey);
                 }
 
                 enumHasMoreEntries = enumerator.MoveNext();
 
                 if (actorIdList.Count == itemsCount)
                 {
-                    actorQueryResult.Items = actorIdList.AsReadOnly();
+                    actorQueryResult.Items = actorIdList;
 
                     // If enumerator has more elements, then set the continuation token.
                     if (enumHasMoreEntries)
                     {
-                        actorQueryResult.ContinuationToken = new ContinuationToken(storageKey.ToString());
+                        actorQueryResult.ContinuationToken = new ContinuationToken(storageKey);
                     }
 
                     return Task.FromResult(actorQueryResult);
@@ -491,7 +469,7 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
 
             // We are here means 'actorIdList' contains less than 'itemsCount'
             // item or it is empty. The continuation token will remain null.
-            actorQueryResult.Items = actorIdList.AsReadOnly();
+            actorQueryResult.Items = actorIdList;
 
             return Task.FromResult(actorQueryResult);
         }
@@ -528,7 +506,7 @@ namespace Microsoft.ServiceFabric.Actors.Runtime
             var storageKey = getStorageKeyFunc(enumerator.Current);
 
             // Skip the previous returned entries
-            while (enumHasMoreEntries && string.Compare(storageKey, lastSeenActorStorageKey, StringComparison.InvariantCultureIgnoreCase) <= 0)
+            while (enumHasMoreEntries && string.Compare(storageKey, lastSeenActorStorageKey, StringComparison.OrdinalIgnoreCase) <= 0)
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
